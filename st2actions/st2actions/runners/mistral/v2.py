@@ -48,14 +48,7 @@ class MistralRunner(AsyncActionRunner):
         self._on_behalf_user = cfg.CONF.system_user.user
         self._notify = None
         self._skip_notify_tasks = []
-        self._client = mistral.client(
-            mistral_url=self.url,
-            username=cfg.CONF.mistral.keystone_username,
-            api_key=cfg.CONF.mistral.keystone_password,
-            project_name=cfg.CONF.mistral.keystone_project_name,
-            auth_url=cfg.CONF.mistral.keystone_auth_url,
-            cacert=cfg.CONF.mistral.cacert,
-            insecure=cfg.CONF.mistral.insecure)
+        self._client = None
 
     def pre_run(self):
         if getattr(self, 'liveaction', None):
@@ -194,6 +187,15 @@ class MistralRunner(AsyncActionRunner):
         wait_exponential_max=cfg.CONF.mistral.retry_exp_max_msec,
         stop_max_delay=cfg.CONF.mistral.retry_stop_max_msec)
     def run(self, action_parameters):
+        if not self._client:
+            self._client = mistral.client(
+                mistral_url=self.url,
+                cacert=cfg.CONF.mistral.cacert,
+                insecure=cfg.CONF.mistral.insecure,
+                auth_type='st2',
+                auth_token=self.auth_token.token
+            )
+
         resume_options = self._get_resume_options()
 
         tasks_to_reset = resume_options.get('reset', [])
@@ -305,6 +307,18 @@ class MistralRunner(AsyncActionRunner):
         if not mistral_ctx.get('execution_id'):
             raise Exception('Unable to rerun because mistral execution_id is missing.')
 
+        if not mistral_ctx.get('auth_token'):
+            raise Exception('Unable to rerun because auth_token is missing in the context.')
+
+        if not self._client:
+            self._client = mistral.client(
+                mistral_url=self.url,
+                cacert=cfg.CONF.mistral.cacert,
+                insecure=cfg.CONF.mistral.insecure,
+                auth_type='st2',
+                auth_token=mistral_ctx.get('auth_token')
+            )
+
         execution = self._client.executions.get(mistral_ctx.get('execution_id'))
 
         # pylint: disable=no-member
@@ -361,12 +375,23 @@ class MistralRunner(AsyncActionRunner):
         if not mistral_ctx.get('execution_id'):
             raise Exception('Unable to cancel because mistral execution_id is missing.')
 
+        if not mistral_ctx.get('auth_token'):
+            raise Exception('Unable to cancel because auth_token is missing in the context.')
+
+        if not self._client:
+            self._client = mistral.client(
+                mistral_url=self.url,
+                cacert=cfg.CONF.mistral.cacert,
+                insecure=cfg.CONF.mistral.insecure,
+                auth_type='st2',
+                auth_token=mistral_ctx.get('auth_token')
+            )
+
         # There is no cancellation state in Mistral. Pause the workflow so
         # actions that are still executing can gracefully reach completion.
         self._client.executions.update(mistral_ctx.get('execution_id'), 'PAUSED')
 
-    @staticmethod
-    def _build_mistral_context(parent, current):
+    def _build_mistral_context(self, parent, current):
         """
         Mistral workflow might be kicked off in st2 by a parent Mistral
         workflow. In that case, we need to make sure that the existing
@@ -394,5 +419,7 @@ class MistralRunner(AsyncActionRunner):
                 context['mistral']['parent'] = actual_parent
             else:
                 context['mistral'] = current
+
+        context['mistral']['auth_token'] = self.auth_token.token
 
         return context

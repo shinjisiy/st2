@@ -25,6 +25,7 @@ from mistralclient.api.v2 import action_executions
 from st2actions import handlers
 from st2common.constants import action as action_constants
 from st2common import log as logging
+from st2common.persistence.execution import ActionExecution
 from st2common.util.workflow import mistral as utils
 
 
@@ -66,19 +67,18 @@ class MistralCallbackHandler(handlers.ActionExecutionCallbackHandler):
         wait_exponential_multiplier=cfg.CONF.mistral.retry_exp_msec,
         wait_exponential_max=cfg.CONF.mistral.retry_exp_max_msec,
         stop_max_delay=cfg.CONF.mistral.retry_stop_max_msec)
-    def _update_action_execution(cls, url, data):
+    def _update_action_execution(cls, url, data, auth_token):
         action_execution_id = get_action_execution_id_from_url(url)
 
         LOG.info('Sending callback to %s with data %s.', url, data)
 
         client = mistral.client(
             mistral_url=cfg.CONF.mistral.v2_base_url,
-            username=cfg.CONF.mistral.keystone_username,
-            api_key=cfg.CONF.mistral.keystone_password,
-            project_name=cfg.CONF.mistral.keystone_project_name,
-            auth_url=cfg.CONF.mistral.keystone_auth_url,
             cacert=cfg.CONF.mistral.cacert,
-            insecure=cfg.CONF.mistral.insecure)
+            insecure=cfg.CONF.mistral.insecure,
+            auth_type='st2',
+            auth_token=auth_token
+        )
 
         manager = action_executions.ActionExecutionManager(client)
         manager.update(action_execution_id, **data)
@@ -87,6 +87,12 @@ class MistralCallbackHandler(handlers.ActionExecutionCallbackHandler):
     def callback(cls, url, context, status, result):
         if status not in action_constants.LIVEACTION_COMPLETED_STATES:
             return
+
+        parent_ex_id = context['parent']['execution_id']
+        parent_ex = ActionExecution.get_by_id(parent_ex_id)
+        parent_ex_ctx = parent_ex.context
+        mistral_ctx = parent_ex_ctx.get('mistral', {})
+        mistral_auth_token = mistral_ctx.get('auth_token', None)
 
         try:
             if isinstance(result, basestring) and len(result) > 0 and result[0] in ['{', '[']:
@@ -97,6 +103,6 @@ class MistralCallbackHandler(handlers.ActionExecutionCallbackHandler):
             output = json.dumps(result) if type(result) in [dict, list] else str(result)
             data = {'state': STATUS_MAP[status], 'output': output}
 
-            cls._update_action_execution(url, data)
+            cls._update_action_execution(url, data, mistral_auth_token)
         except Exception as e:
             LOG.exception(e)

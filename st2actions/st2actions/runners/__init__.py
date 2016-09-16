@@ -108,10 +108,7 @@ class ActionRunner(object):
         callback = self.callback or {}
         if callback and not (set(['url', 'source']) - set(callback.keys())):
             handler = handlers.get_handler(callback['source'])
-            handler.callback(callback['url'],
-                             self.context,
-                             status,
-                             result)
+            handler.callback(callback['url'], self.context, status, result)
 
     def get_pack_name(self):
         """

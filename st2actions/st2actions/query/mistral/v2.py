@@ -31,14 +31,6 @@ class MistralResultsQuerier(Querier):
     def __init__(self, id, *args, **kwargs):
         super(MistralResultsQuerier, self).__init__(*args, **kwargs)
         self._base_url = get_url_without_trailing_slash(cfg.CONF.mistral.v2_base_url)
-        self._client = mistral.client(
-            mistral_url=self._base_url,
-            username=cfg.CONF.mistral.keystone_username,
-            api_key=cfg.CONF.mistral.keystone_password,
-            project_name=cfg.CONF.mistral.keystone_project_name,
-            auth_url=cfg.CONF.mistral.keystone_auth_url,
-            cacert=cfg.CONF.mistral.cacert,
-            insecure=cfg.CONF.mistral.insecure)
 
     @retrying.retry(
         retry_on_exception=utils.retry_on_exceptions,
@@ -55,14 +47,29 @@ class MistralResultsQuerier(Querier):
         :type query_context: ``objext``
         :rtype: (``str``, ``object``)
         """
-        mistral_exec_id = query_context.get('mistral', {}).get('execution_id', None)
+        mistral_qry_ctx = query_context.get('mistral', {})
+
+        mistral_auth_token = mistral_qry_ctx.get('auth_token', None)
+        if not mistral_auth_token:
+            raise Exception('[%] Missing mistral auth token in query context. %s',
+                            execution_id, query_context)
+
+        mistral_client = mistral.client(
+            mistral_url=self._base_url,
+            cacert=cfg.CONF.mistral.cacert,
+            insecure=cfg.CONF.mistral.insecure,
+            auth_type='st2',
+            auth_token=mistral_auth_token
+        )
+
+        mistral_exec_id = mistral_qry_ctx.get('execution_id', None)
         if not mistral_exec_id:
             raise Exception('[%s] Missing mistral workflow execution ID in query context. %s',
                             execution_id, query_context)
 
         try:
-            result = self._get_workflow_result(mistral_exec_id)
-            result['tasks'] = self._get_workflow_tasks(mistral_exec_id)
+            result = self._get_workflow_result(mistral_client, mistral_exec_id)
+            result['tasks'] = self._get_workflow_tasks(mistral_client, mistral_exec_id)
         except Exception:
             LOG.exception('[%s] Unable to fetch mistral workflow result and tasks. %s',
                           execution_id, query_context)
@@ -76,7 +83,7 @@ class MistralResultsQuerier(Querier):
 
         return (status, result)
 
-    def _get_workflow_result(self, exec_id):
+    def _get_workflow_result(self, client, exec_id):
         """
         Returns the workflow status and output. Mistral workflow status will be converted
         to st2 action status.
@@ -84,7 +91,7 @@ class MistralResultsQuerier(Querier):
         :type exec_id: ``str``
         :rtype: (``str``, ``dict``)
         """
-        execution = executions.ExecutionManager(self._client).get(exec_id)
+        execution = executions.ExecutionManager(client).get(exec_id)
 
         result = jsonify.try_loads(execution.output) if execution.state in DONE_STATES else {}
 
@@ -95,16 +102,19 @@ class MistralResultsQuerier(Querier):
 
         return result
 
-    def _get_workflow_tasks(self, exec_id):
+    def _get_workflow_tasks(self, client, exec_id):
         """
         Returns the list of tasks for a workflow execution.
         :param exec_id: Mistral execution ID
         :type exec_id: ``str``
         :rtype: ``list``
         """
-        wf_tasks = tasks.TaskManager(self._client).list(workflow_execution_id=exec_id)
+        wf_tasks = [
+            tasks.TaskManager(client).get(task.id)
+            for task in tasks.TaskManager(client).list(workflow_execution_id=exec_id)
+        ]
 
-        return [self._format_task_result(task=wf_task.to_dict()) for wf_task in wf_tasks]
+        return [self._format_task_result(task=task.to_dict()) for task in wf_tasks]
 
     def _format_task_result(self, task):
         """
