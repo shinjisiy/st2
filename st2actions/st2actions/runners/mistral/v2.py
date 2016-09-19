@@ -361,9 +361,7 @@ class MistralRunner(AsyncActionRunner):
         if not mistral_ctx.get('execution_id'):
             raise Exception('Unable to cancel because mistral execution_id is missing.')
 
-        # There is no cancellation state in Mistral. Pause the workflow so
-        # actions that are still executing can gracefully reach completion.
-        self._client.executions.update(mistral_ctx.get('execution_id'), 'PAUSED')
+        self._client.executions.update(mistral_ctx.get('execution_id'), 'CANCELLED')
 
     @staticmethod
     def _build_mistral_context(parent, current):
